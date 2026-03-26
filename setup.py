@@ -18,7 +18,7 @@ setup(
     name="turboquant-kv",
     version=__version__,
     description="Open-source implementation of Google TurboQuant for extreme KV-cache compression",
-    author="hackimov + Grok (xAI)",
+    author="hackimov",
     url="https://github.com/hackimov/turboquant-kv",
     project_urls={
         "Source": "https://github.com/hackimov/turboquant-kv",
