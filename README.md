@@ -2,7 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/turboquant-kv?logo=pypi&logoColor=gold)](https://pypi.org/project/turboquant-kv/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/turboquant-kv?logo=pypi)](https://pypi.org/project/turboquant-kv/)
-[![CI](https://img.shields.io/github/actions/workflow/status/hackimov/turboquant-kv/triton-gpu.yml?branch=master&label=CI&logo=github)](https://github.com/hackimov/turboquant-kv/actions/workflows/triton-gpu.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/hackimov/turboquant-kv/ci.yml?branch=master&label=CI&logo=github)](https://github.com/hackimov/turboquant-kv/actions/workflows/ci.yml)
 [![License](https://img.shields.io/pypi/l/turboquant-kv?label=License)](./LICENSE)
 
 <div align="center">
