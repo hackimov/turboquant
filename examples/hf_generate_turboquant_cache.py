@@ -24,7 +24,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--from-config", action="store_true", help="Random tiny Llama from config; no Hub weights.")
     p.add_argument("--prompt", default="Hello", help="Prompt when using a real tokenizer")
     p.add_argument("--max-new-tokens", type=int, default=16)
-    p.add_argument("--bits", type=int, default=3, choices=(2, 3, 4))
+    p.add_argument(
+        "--bits",
+        type=float,
+        default=3.0,
+        choices=(1.5, 2.0, 2.5, 3.0, 4.0),
+    )
     p.add_argument(
         "--strict-reencode",
         action="store_true",

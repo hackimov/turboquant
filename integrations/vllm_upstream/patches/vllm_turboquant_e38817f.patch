@@ -14,8 +14,8 @@ index 8a9eb48..e20d43a 100644
      bfloat16 instead, this is an invalid option for models that do not default
      to fp8.
      """
-+    turboquant_bits: int = Field(default=3, ge=2, le=4)
-+    """Bit width for TurboQuant KV when ``cache_dtype == \"turboquant\"`` (2–4)."""
++    turboquant_bits: float = Field(default=3, ge=1.5, le=4)
++    """Bit width for TurboQuant KV when ``cache_dtype == \"turboquant\"`` (supports 1.5/2.5 outlier allocation)."""
      is_attention_free: bool = False
      """Whether the model is attention-free. This is primarily set in
      `ModelConfig` and that value should be manually duplicated here."""
@@ -37,7 +37,7 @@ index d4018b7..f204847 100644
      config_format: str = ModelConfig.config_format
      dtype: ModelDType = ModelConfig.dtype
      kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
-+    turboquant_bits: int = get_field(CacheConfig, "turboquant_bits")
++    turboquant_bits: float = get_field(CacheConfig, "turboquant_bits")
      seed: int = ModelConfig.seed
      max_model_len: int = ModelConfig.max_model_len
      cudagraph_capture_sizes: list[int] | None = (
@@ -341,7 +341,7 @@ index 0000000..1cfbc64
 +            from turboquant import TurboQuantProd
 +
 +            cfg = get_current_vllm_config()
-+            bits = int(getattr(cfg.cache_config, "turboquant_bits", 3))
++            bits = float(getattr(cfg.cache_config, "turboquant_bits", 3))
 +            self._quantizer = TurboQuantProd(
 +                bits=bits,
 +                head_dim=self.head_size,

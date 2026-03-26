@@ -2,7 +2,7 @@
 
 End-to-end wiring for **vLLM v1** with packed TurboQuant KV pages and Triton fused decode (`turboquant` + `turboquant.vllm_pack`). After applying the patch below you get:
 
-- `--kv-cache-dtype turboquant` and `--turboquant-bits {2,3,4}` (default 3)
+- `--kv-cache-dtype turboquant` and `--turboquant-bits {1.5,2,2.5,3,4}` (default 3)
 - CUDA backend selection → `TURBOQUANT_ATTN` when the KV dtype is `turboquant`
 - `TurboQuantAttentionSpec` for correct `real_page_size_bytes` in the KV allocator
 - Backend module `vllm/v1/attention/backends/turboquant_attn.py` (same content as `overlay/...` in this repo)
@@ -37,7 +37,7 @@ Use this when you need to confirm that **TurboQuant’s Triton path** is active 
 vllm serve <model> \
   --kv-cache-dtype turboquant \
   --max-model-len 4096
-# optional: --turboquant-bits 4   # default 3; allowed 2–4
+# optional: --turboquant-bits 4   # default 3; allowed 1.5–4 (incl. 1.5/2.5 outlier allocation)
 ```
 
 First bring-up (CUDA graph issues): add `--enforce-eager` (see [Limitations](#limitations)).

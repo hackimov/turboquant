@@ -177,7 +177,8 @@ class TurboQuantAttentionImpl(AttentionImpl):
             from turboquant import TurboQuantProd
 
             cfg = get_current_vllm_config()
-            bits = int(getattr(cfg.cache_config, "turboquant_bits", 3))
+            # turboquant_bits may be fractional (1.5/2.5) for outlier channel allocation.
+            bits = float(getattr(cfg.cache_config, "turboquant_bits", 3))
             self._quantizer = TurboQuantProd(
                 bits=bits,
                 head_dim=self.head_size,

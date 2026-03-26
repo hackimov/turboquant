@@ -35,6 +35,27 @@ class TestLlamaCppPack(unittest.TestCase):
         self.assertEqual(q1._centroids.numel(), 3)
         self.assertTrue(torch.allclose(q0._centroids, q1._centroids))
 
+    def test_metadata_roundtrip_fractional_bits(self):
+        d, bits = 64, 1.5
+        q0 = TurboQuantProd(bits=bits, head_dim=d, device="cpu", seed=42, codebook="paper")
+        blob = serialize_quantizer_metadata(q0)
+        q1 = deserialize_quantizer_metadata(blob, device="cpu")
+        self.assertEqual(q1.codebook, "paper")
+        self.assertEqual(q0.bits, q1.bits)
+        self.assertEqual(q0._centroids.numel(), q1._centroids.numel())
+        self.assertTrue(torch.allclose(q0._centroids, q1._centroids))
+
+        k = torch.randn(1, 2, 5, d)
+        v = torch.randn(1, 2, 5, d)
+        c0 = q0.quantize_kv(k, v, return_compressed=True)
+        c1 = q1.quantize_kv(k, v, return_compressed=True)
+        for name in c0:
+            a, b = c0[name], c1[name]
+            if a.dtype in (torch.int32, torch.int64):
+                self.assertTrue(torch.equal(a, b), msg=name)
+            else:
+                self.assertTrue(torch.allclose(a, b, rtol=1e-5, atol=1e-5), msg=name)
+
     def test_metadata_file_roundtrip_quantize_match(self):
         d, bits = 32, 2
         q0 = TurboQuantProd(bits=bits, head_dim=d, device="cpu", seed=7)

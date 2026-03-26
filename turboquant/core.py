@@ -13,10 +13,36 @@ CodebookKind = Literal["paper", "ternary"]
 CentroidsCacheKey = Tuple[CodebookKind, int, int]
 
 
-def _centroid_levels_for(bits: int, codebook: CodebookKind) -> int:
+def _levels_from_mse_bits(mse_bits: int) -> int:
+    """
+    MSE-stage uses ``K = 2^(mse_bits)`` levels for ``mse_bits > 0`` and a degenerate single centroid
+    for ``mse_bits <= 0``.
+    """
+    return 1 if mse_bits <= 0 else 2**mse_bits
+
+
+def _centroid_levels_for(bits: float, codebook: CodebookKind) -> int:
+    """
+    How many MSE centroids are required for the given (possibly fractional) total `bits`.
+
+    TurboQuant splits total bitwidth `b` into:
+      - MSE-stage: `b - 1` bits
+      - QJL-stage: 1 bit (always present)
+
+    For fractional MSE-stage bitwidth we implement "outlier channel allocation" as a mixture:
+    a fraction of channels use the higher integer MSE bitwidth.
+    """
     if codebook == "ternary":
         return 3
-    return max(1, 2 ** max(0, int(bits) - 1))
+
+    mse_bits = float(bits) - 1.0
+    # Integer bitwidth => integer MSE bitwidth.
+    if abs(mse_bits - round(mse_bits)) < 1e-6:
+        return _levels_from_mse_bits(int(round(mse_bits)))
+
+    # Fractional case: mse_bits = low + frac, with low integer and frac in (0,1).
+    low = int(math.floor(mse_bits))
+    return _levels_from_mse_bits(low) + _levels_from_mse_bits(low + 1)
 
 
 class TurboQuantProd:
@@ -61,7 +87,7 @@ class TurboQuantProd:
 
     def __init__(
         self,
-        bits: int = 3,
+        bits: float = 3,
         head_dim: int = 128,
         device: Optional[str] = None,
         seed: Optional[int] = None,
@@ -73,7 +99,7 @@ class TurboQuantProd:
         S: Optional[torch.Tensor] = None,
         centroids: Optional[torch.Tensor] = None,
     ):
-        self.bits = int(bits)
+        self.bits = float(bits)
         self.head_dim = int(head_dim)
         if codebook not in ("paper", "ternary"):
             raise ValueError('codebook must be "paper" or "ternary"')
@@ -108,7 +134,27 @@ class TurboQuantProd:
                 torch.cuda.manual_seed_all(seed)
 
         # Algorithm 2: total bit-width is b; MSE stage uses (b-1) bits.
-        self._mse_bits = self.bits - 1
+        mse_bits = float(self.bits) - 1.0
+        mse_bits_low = int(math.floor(mse_bits + 1e-12))
+        mse_bits_frac = float(mse_bits - float(mse_bits_low))
+        if abs(mse_bits_frac) < 1e-8:
+            mse_bits_frac = 0.0
+        if mse_bits_frac < 0.0 or mse_bits_frac >= 1.0:
+            # Defensive: should never happen for b in [1, +inf).
+            mse_bits_frac = 0.0
+
+        self._mse_bits_low = mse_bits_low
+        self._mse_bits_frac = mse_bits_frac
+        self._mse_bits_high = mse_bits_low if mse_bits_frac == 0.0 else mse_bits_low + 1
+        self._use_fractional_mse_bits = self._mse_bits_high != self._mse_bits_low
+
+        self._centroids_low_levels = _levels_from_mse_bits(self._mse_bits_low)
+        self._centroids_high_levels = (
+            0 if not self._use_fractional_mse_bits else _levels_from_mse_bits(self._mse_bits_high)
+        )
+
+        if self.codebook == "ternary" and self._use_fractional_mse_bits:
+            raise ValueError('fractional bits are not supported for codebook="ternary"')
 
         # Optionally compile hot paths. If compilation fails, we fall back to eager mode.
         self._quantize_components_impl: Callable[..., Any] = self._quantize_components
@@ -147,7 +193,16 @@ class TurboQuantProd:
         elif self.codebook == "ternary":
             self._centroids = self._build_ternary_centroids(self.head_dim).to(self.device, dtype=self.dtype)
         else:
-            self._centroids = self._build_centroids(self.head_dim, self._mse_bits).to(self.device, dtype=self.dtype)
+            if not self._use_fractional_mse_bits:
+                self._centroids = self._build_centroids(self.head_dim, self._mse_bits_low).to(
+                    self.device, dtype=self.dtype
+                )
+            else:
+                low_c = self._build_centroids(self.head_dim, self._mse_bits_low).to(self.device, dtype=self.dtype)
+                high_c = self._build_centroids(self.head_dim, self._mse_bits_high).to(
+                    self.device, dtype=self.dtype
+                )
+                self._centroids = torch.cat([low_c, high_c], dim=0)
         self._mse_levels = int(self._centroids.numel())
 
         # sqrt(pi/2)/d factor used in Algorithm 2 dequantization.
@@ -427,6 +482,58 @@ class TurboQuantProd:
         x_tilde_unit = y_tilde @ self.Pi  # [N, d]
         return idx, x_tilde_unit
 
+    def _quantmse_fractional(
+        self, x_unit: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Fractional `bits` implementation via outlier channel allocation.
+
+        We allocate a fraction of coordinates with higher integer MSE bitwidth, and all other
+        coordinates use the lower integer MSE bitwidth. The decoder infers which centroid set
+        was used from `idx` ranges (no extra mask stored).
+        """
+        # y = Π x_unit, row-major: [N, d]
+        y = x_unit @ self.Pi.T
+        n, d = y.shape
+
+        # Fraction of coordinates assigned to the higher MSE bitwidth.
+        frac = float(self._mse_bits_frac)
+        k_out = int(round(frac * d))
+        k_out = max(0, min(d, k_out))
+
+        # Slice centroid bank as [low, high].
+        k_low = int(self._centroids_low_levels)
+        c_low = self._centroids[:k_low]
+        c_high = self._centroids[k_low:]
+
+        # Argmin for low and high independently; selection happens by idx-range.
+        if k_low == 1:
+            idx_low = torch.zeros((n, d), device=y.device, dtype=torch.int64)
+        else:
+            dist_low = torch.abs(y.float().unsqueeze(-1) - c_low.float().view(1, 1, -1))  # [N,d,k_low]
+            idx_low = torch.argmin(dist_low, dim=-1).to(torch.int64)
+
+        k_high = int(c_high.numel())
+        if k_high == 1:
+            idx_high = torch.zeros((n, d), device=y.device, dtype=torch.int64)
+        else:
+            dist_high = torch.abs(y.float().unsqueeze(-1) - c_high.float().view(1, 1, -1))  # [N,d,k_high]
+            idx_high = torch.argmin(dist_high, dim=-1).to(torch.int64)
+
+        if k_out == 0:
+            idx = idx_low
+        else:
+            abs_y = torch.abs(y)
+            topk = torch.topk(abs_y, k_out, dim=-1, largest=True, sorted=False).indices  # [N,k_out]
+            mask = torch.zeros((n, d), device=y.device, dtype=torch.bool)
+            mask.scatter_(dim=-1, index=topk, value=True)
+            idx = idx_low.clone()
+            idx[mask] = idx_high[mask] + k_low
+
+        y_tilde = self._centroids[idx]  # [N, d]
+        x_tilde_unit = y_tilde @ self.Pi  # [N, d]
+        return idx, x_tilde_unit
+
     def _dequantprod_unit(self, idx: torch.Tensor, qjl_sign: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
         """
         Algorithm 2 DeQuantprod on unit vectors:
@@ -463,7 +570,10 @@ class TurboQuantProd:
         x_norm_d = x_norm.to(dtype=self.dtype)
         x_unit = (x / x_norm_d)  # [N, d] in self.dtype
 
-        idx, x_tilde_mse_unit = self._quantmse(x_unit)
+        if self._use_fractional_mse_bits:
+            idx, x_tilde_mse_unit = self._quantmse_fractional(x_unit)
+        else:
+            idx, x_tilde_mse_unit = self._quantmse(x_unit)
 
         r_unit = x_unit - x_tilde_mse_unit
         gamma = torch.linalg.norm(r_unit.float(), dim=-1, keepdim=True).clamp(min=0.0)  # float32

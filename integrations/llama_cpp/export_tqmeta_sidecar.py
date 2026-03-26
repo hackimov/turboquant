@@ -53,7 +53,7 @@ def build_quantizer_from_args(args: argparse.Namespace) -> TurboQuantProd:
 
     if args.seed is not None:
         return TurboQuantProd(
-            bits=int(args.bits),
+            bits=float(args.bits),
             head_dim=int(args.head_dim),
             device=device,
             dtype=dtype,
@@ -73,7 +73,7 @@ def build_quantizer_from_args(args: argparse.Namespace) -> TurboQuantProd:
         centroids = _load_tensor_auto(Path(args.centroids_path), dtype=dtype).view(-1)
 
     return TurboQuantProd(
-        bits=int(args.bits),
+        bits=float(args.bits),
         head_dim=int(args.head_dim),
         device=device,
         dtype=dtype,
@@ -99,7 +99,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Output path for the sidecar (defaults to derived from --gguf).",
     )
 
-    p.add_argument("--bits", type=int, required=True, choices=(2, 3, 4), help="TurboQuant bits (2-4).")
+    p.add_argument(
+        "--bits",
+        type=float,
+        required=True,
+        choices=(1.5, 2.0, 2.5, 3.0, 4.0),
+        help="TurboQuant bits (supports 1.5/2.5 outlier channel allocation).",
+    )
     p.add_argument("--head-dim", type=int, required=True, help="KV head dim (per attention head).")
     p.add_argument(
         "--codebook",

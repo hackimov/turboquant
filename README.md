@@ -33,7 +33,7 @@ The [Google Research blog](https://research.google/blog/turboquant-redefining-ai
 
 ### Core (PyTorch)
 
-- **`TurboQuantProd`**: PolarQuant + QJL, **2 / 3 / 4** bits, configurable **`head_dim`**.
+- **`TurboQuantProd`**: PolarQuant + QJL, **1.5 / 2 / 2.5 / 3 / 4** bits, configurable **`head_dim`**.
 - Compress / restore K/V pairs: **`compress` / `decompress`**, **`quantize_kv`** (including returning the compressed representation).
 - Optional **calibration** from batches/tensors: **`calibrate_turboquant_from_tensor`**, **`calibrate_turboquant_from_batches`**, **`CalibrationMode`** (see `turboquant.calibration`).
 

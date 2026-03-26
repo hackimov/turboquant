@@ -37,7 +37,7 @@ class TurboQuantModel:
         model: Any,
         quantizer: Optional[TurboQuantProd] = None,
         *,
-        bits: int = 3,
+        bits: float = 3.0,
         head_dim: Optional[int] = None,
         device: Optional[str] = None,
         dtype: torch.dtype = torch.float32,
