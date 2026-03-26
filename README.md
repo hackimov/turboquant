@@ -1,6 +1,4 @@
-<div align="center">
-# TurboQuant — Extreme KV Cache Quantization
-</div>
+<h1 align="center">TurboQuant — Extreme KV Cache Quantization</h1>
 
 <div align="center">
 
