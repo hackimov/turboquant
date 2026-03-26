@@ -122,6 +122,15 @@ class TestHFTurboQuantCache(unittest.TestCase):
         self.assertEqual(layer.get_seq_length(), 1)
         self.assertEqual(layer.keys.shape[-2], 1)
 
+    def test_cross_attention_mask_broadcasts_from_b_1_m_n(self):
+        """M2M-100 / NLLB-style cross padding mask often looks like [B, 1, tgt, src] (last two = score dims)."""
+        from turboquant.kernels.attention_mask import broadcast_additive_attn_mask
+
+        B, H, M, N = 2, 16, 1, 64
+        m = torch.ones(B, 1, M, N, dtype=torch.bool)
+        out = broadcast_additive_attn_mask(m, B, H, M, N, device=m.device)
+        self.assertEqual(tuple(out.shape), (B, H, M, N))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

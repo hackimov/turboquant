@@ -4,6 +4,8 @@ Optional integration helpers for Hugging Face ``transformers`` (KV cache) and no
 - **Legacy tuple** ``past_key_values``: ``TurboQuantModel.quantize_past_key_values`` / ``dequantize_past_key_values``.
 - **HF ``Cache`` (5.x):** ``turboquant_dynamic_cache(model.config, quantizer)`` or
   ``TurboQuantModel.make_dynamic_cache()`` → ``TurboQuantDynamicCache`` with compressed non-sliding layers;
+  for encoder-decoder models: ``turboquant_encoder_decoder_cache(...)`` or
+  ``TurboQuantModel.make_encoder_decoder_cache()`` → ``EncoderDecoderCache`` with compressed cross-attention KV;
   paged export: ``export_cache_to_paged_per_layer`` in ``turboquant.hf_cache``.
 
 Requires ``pip install transformers`` (or ``turboquant-kv[hf]``) for the cache path; importing ``turboquant.hf_cache``
@@ -141,6 +143,42 @@ class TurboQuantModel:
             cfg,
             self.quantizer,
             triton_fused_layers=triton_fused_layers,
+            strict_reencode=strict_reencode,
+            hybrid_float_cache=hybrid_float_cache,
+            offloading=offloading,
+            offload_only_non_sliding=offload_only_non_sliding,
+        )
+
+    def make_encoder_decoder_cache(
+        self,
+        *,
+        quantize_self: bool = False,
+        triton_fused_self: bool = False,
+        triton_fused_cross: bool = False,
+        strict_reencode: bool = False,
+        hybrid_float_cache: bool = False,
+        offloading: bool = False,
+        offload_only_non_sliding: bool = False,
+    ):
+        """
+        Build a :class:`turboquant.hf_cache.TurboQuantEncoderDecoderCache` for encoder-decoder models
+        (T5 / mT5 / M2M-100 & NLLB-family / MarianMT, etc.) where **cross-attention KV** is TurboQuant-compressed.
+
+        By default `quantize_self=False` keeps decoder self-attention KV as HF float (safer quality parity for
+        translation/summarization).
+        """
+        from .hf_cache import turboquant_encoder_decoder_cache
+
+        cfg = getattr(self.model, "config", None)
+        if cfg is None:
+            raise ValueError("TurboQuantModel.model must have a .config (HF PreTrainedConfig)")
+
+        return turboquant_encoder_decoder_cache(
+            cfg,
+            self.quantizer,
+            quantize_self=quantize_self,
+            triton_fused_self=triton_fused_self,
+            triton_fused_cross=triton_fused_cross,
             strict_reencode=strict_reencode,
             hybrid_float_cache=hybrid_float_cache,
             offloading=offloading,

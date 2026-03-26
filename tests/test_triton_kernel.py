@@ -62,12 +62,57 @@ class TestTritonQuantizedAttentionKernel(unittest.TestCase):
         importlib.util.find_spec("triton") is not None and torch.cuda.is_available(),
         "requires triton and CUDA",
     )
-    def test_attention_scores_gqa(self):
+    def test_attention_scores_mqa(self):
+        """MQA: one KV head, ``num_kv_heads=1`` (Falcon / older GPT-J style)."""
         device = "cuda"
         D = 32
         H_q, H_kv = 4, 1
         quantizer = TurboQuantProd(bits=3, head_dim=D, device=device, dtype=torch.float32, seed=1)
         B, M, N = 1, 3, 9
+        q = torch.randn(B, H_q, M, D, device=device)
+        k_kv = torch.randn(B, H_kv, N, D, device=device)
+        kv = quantizer.quantize_kv(k_kv, k_kv, return_compressed=True)
+        scores_t = quantizer.quantized_attention_scores_triton(q, kv, num_kv_heads=H_kv)
+        k_rep = k_kv.repeat_interleave(H_q // H_kv, dim=1)
+        kv2 = quantizer.quantize_kv(k_rep, k_rep, return_compressed=True)
+        scores_r = quantizer.quantized_attention_scores_triton(q, kv2)
+        max_err = torch.max(torch.abs(scores_t - scores_r)).item()
+        self.assertLess(max_err, 1e-3)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("triton") is not None and torch.cuda.is_available(),
+        "requires triton and CUDA",
+    )
+    def test_attention_scores_mqa_falcon_like_16_query_1_kv(self):
+        """High fan-out MQA (many Q heads, one K/V head) — scores path."""
+        device = "cuda"
+        D = 32
+        H_q, H_kv = 16, 1
+        quantizer = TurboQuantProd(bits=3, head_dim=D, device=device, dtype=torch.float32, seed=6)
+        B, M, N = 1, 4, 11
+        torch.manual_seed(7)
+        q = torch.randn(B, H_q, M, D, device=device)
+        k_kv = torch.randn(B, H_kv, N, D, device=device)
+        kv = quantizer.quantize_kv(k_kv, k_kv, return_compressed=True)
+        scores_t = quantizer.quantized_attention_scores_triton(q, kv, num_kv_heads=H_kv)
+        k_rep = k_kv.repeat_interleave(H_q // H_kv, dim=1)
+        kv2 = quantizer.quantize_kv(k_rep, k_rep, return_compressed=True)
+        scores_r = quantizer.quantized_attention_scores_triton(q, kv2)
+        max_err = torch.max(torch.abs(scores_t - scores_r)).item()
+        self.assertLess(max_err, 1e-3)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("triton") is not None and torch.cuda.is_available(),
+        "requires triton and CUDA",
+    )
+    def test_attention_scores_gqa_llama_style_8_query_2_kv(self):
+        """Scores kernel: same GQA head grouping as fused attention (Llama-3 style ratios)."""
+        device = "cuda"
+        D = 32
+        H_q, H_kv = 8, 2
+        quantizer = TurboQuantProd(bits=3, head_dim=D, device=device, dtype=torch.float32, seed=2)
+        B, M, N = 1, 5, 12
+        torch.manual_seed(3)
         q = torch.randn(B, H_q, M, D, device=device)
         k_kv = torch.randn(B, H_kv, N, D, device=device)
         kv = quantizer.quantize_kv(k_kv, k_kv, return_compressed=True)

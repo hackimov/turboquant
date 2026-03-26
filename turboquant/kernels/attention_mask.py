@@ -28,6 +28,10 @@ def broadcast_additive_attn_mask(
     - ``[B, M, N]`` — shared heads
     - ``[B, H, M, N]`` — full
 
+    Encoder–decoder **cross-attention** often supplies a dense padding mask with last dims ``(M, N)`` =
+    ``(decoder_query_len, encoder_key_len)``, e.g. ``[batch, 1, tgt_len, src_len]`` — valid as long as the
+    trailing ``(M, N)`` matches the score matrix.
+
     The result may use stride ``0`` on broadcast dimensions (no copy).
     """
     dev = device if device is not None else attention_mask.device

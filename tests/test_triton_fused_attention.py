@@ -9,6 +9,39 @@ from turboquant import TurboQuantProd
 from turboquant.kernels.fused_attention import pack_dense_kv_to_paged
 
 
+def _fused_gqa_matches_repeated_kv(
+    quantizer: TurboQuantProd,
+    *,
+    B: int,
+    H_q: int,
+    H_kv: int,
+    M: int,
+    N: int,
+    D: int,
+    device: str,
+    seed: int,
+    **fused_kw,
+) -> float:
+    """
+    Max abs error between shared-KV path (KV ``[B, H_kv, N, D]``) and reference
+    (repeat KV heads to ``H_q`` then quantize). Covers **GQA** (``H_kv``>1) and **MQA**
+    (``H_kv==1``, e.g. Falcon, some GPT-J).
+    """
+    assert H_q % H_kv == 0
+    g = H_q // H_kv
+    torch.manual_seed(seed)
+    q = torch.randn(B, H_q, M, D, device=device, dtype=torch.float32)
+    k_kv = torch.randn(B, H_kv, N, D, device=device, dtype=torch.float32)
+    v_kv = torch.randn(B, H_kv, N, D, device=device, dtype=torch.float32)
+    kv = quantizer.quantize_kv(k_kv, v_kv, return_compressed=True)
+    out_gqa = quantizer.quantized_attention_fused_triton(q, kv, num_kv_heads=H_kv, **fused_kw)
+    k_rep = k_kv.repeat_interleave(g, dim=1)
+    v_rep = v_kv.repeat_interleave(g, dim=1)
+    kv_rep = quantizer.quantize_kv(k_rep, v_rep, return_compressed=True)
+    out_ref = quantizer.quantized_attention_fused_triton(q, kv_rep, **fused_kw)
+    return torch.max(torch.abs(out_gqa - out_ref)).item()
+
+
 class TestTritonFusedAttention(unittest.TestCase):
     @unittest.skipUnless(
         importlib.util.find_spec("triton") is not None and torch.cuda.is_available(),
@@ -102,27 +135,206 @@ class TestTritonFusedAttention(unittest.TestCase):
         importlib.util.find_spec("triton") is not None and torch.cuda.is_available(),
         "requires triton and CUDA",
     )
-    def test_fused_gqa_matches_reference(self):
+    def test_fused_mqa_matches_repeated_kv(self):
+        """MQA: ``num_key_value_heads==1``, multiple Q heads (``num_kv_heads=1`` in API)."""
         device = "cuda"
         D = 32
-        H_q, H_kv = 4, 1
         quantizer = TurboQuantProd(bits=3, head_dim=D, device=device, dtype=torch.float32, seed=3)
+        err = _fused_gqa_matches_repeated_kv(
+            quantizer, B=1, H_q=4, H_kv=1, M=5, N=14, D=D, device=device, seed=20
+        )
+        self.assertLess(err, 5e-3)
 
-        B, M, N = 1, 5, 14
+    @unittest.skipUnless(
+        importlib.util.find_spec("triton") is not None and torch.cuda.is_available(),
+        "requires triton and CUDA",
+    )
+    def test_fused_mqa_falcon_like_16_query_1_kv(self):
+        """Falcon-style MQA: many query heads, single KV head (``KV_HEAD_GROUPS=16``)."""
+        device = "cuda"
+        D = 32
+        quantizer = TurboQuantProd(bits=3, head_dim=D, device=device, dtype=torch.float32, seed=50)
+        err = _fused_gqa_matches_repeated_kv(
+            quantizer, B=1, H_q=16, H_kv=1, M=7, N=20, D=D, device=device, seed=51
+        )
+        self.assertLess(err, 5e-3)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("triton") is not None and torch.cuda.is_available(),
+        "requires triton and CUDA",
+    )
+    def test_fused_mqa_paged_matches_dense(self):
+        """Paged kernel with MQA: same mapping as dense (``h_kv=0`` for all ``h_q``)."""
+        device = "cuda"
+        D = 32
+        block_size = 8
+        H_q, H_kv = 8, 1
+        quantizer = TurboQuantProd(bits=3, head_dim=D, device=device, dtype=torch.float32, seed=52)
+        B, M, N = 1, 4, 24
+        torch.manual_seed(53)
         q = torch.randn(B, H_q, M, D, device=device, dtype=torch.float32)
         k_kv = torch.randn(B, H_kv, N, D, device=device, dtype=torch.float32)
         v_kv = torch.randn(B, H_kv, N, D, device=device, dtype=torch.float32)
         kv = quantizer.quantize_kv(k_kv, v_kv, return_compressed=True)
+        out_dense = quantizer.quantized_attention_fused_triton(q, kv, num_kv_heads=H_kv)
+        paged, block_tables, context_lens = pack_dense_kv_to_paged(kv, block_size=block_size)
+        out_paged = quantizer.quantized_attention_fused_triton_paged(
+            q,
+            paged,
+            block_tables,
+            context_lens,
+            block_size=block_size,
+            max_seq_len=N,
+            num_kv_heads=H_kv,
+        )
+        self.assertLess(torch.max(torch.abs(out_dense - out_paged)).item(), 5e-3)
 
-        out_triton = quantizer.quantized_attention_fused_triton(q, kv, num_kv_heads=H_kv)
+    @unittest.skipUnless(
+        importlib.util.find_spec("triton") is not None and torch.cuda.is_available(),
+        "requires triton and CUDA",
+    )
+    def test_fused_mqa_causal_matches_repeated_kv(self):
+        device = "cuda"
+        D = 32
+        S = 14
+        quantizer = TurboQuantProd(bits=3, head_dim=D, device=device, dtype=torch.float32, seed=54)
+        err = _fused_gqa_matches_repeated_kv(
+            quantizer,
+            B=1,
+            H_q=8,
+            H_kv=1,
+            M=S,
+            N=S,
+            D=D,
+            device=device,
+            seed=55,
+            causal=True,
+        )
+        self.assertLess(err, 5e-3)
 
-        k_rep = k_kv.repeat_interleave(H_q // H_kv, dim=1)
-        v_rep = v_kv.repeat_interleave(H_q // H_kv, dim=1)
-        kv_ref = quantizer.quantize_kv(k_rep, v_rep, return_compressed=True)
-        out_ref = quantizer.quantized_attention_fused_triton(q, kv_ref)
+    @unittest.skipUnless(
+        importlib.util.find_spec("triton") is not None and torch.cuda.is_available(),
+        "requires triton and CUDA",
+    )
+    def test_fused_gqa_llama_style_8_query_2_kv_heads(self):
+        """Llama-3 family: num_attention_heads=8, num_key_value_heads=2 → 4 groups."""
+        device = "cuda"
+        D = 32
+        quantizer = TurboQuantProd(bits=3, head_dim=D, device=device, dtype=torch.float32, seed=30)
+        err = _fused_gqa_matches_repeated_kv(
+            quantizer, B=1, H_q=8, H_kv=2, M=6, N=13, D=D, device=device, seed=31
+        )
+        self.assertLess(err, 5e-3)
 
-        max_err = torch.max(torch.abs(out_triton - out_ref)).item()
-        self.assertLess(max_err, 5e-3)
+    @unittest.skipUnless(
+        importlib.util.find_spec("triton") is not None and torch.cuda.is_available(),
+        "requires triton and CUDA",
+    )
+    def test_fused_gqa_mistral_style_4_query_2_kv_heads(self):
+        """Typical small Mistral-like GQA: 4 Q heads, 2 KV heads."""
+        device = "cuda"
+        D = 32
+        quantizer = TurboQuantProd(bits=3, head_dim=D, device=device, dtype=torch.float32, seed=32)
+        err = _fused_gqa_matches_repeated_kv(
+            quantizer, B=1, H_q=4, H_kv=2, M=4, N=16, D=D, device=device, seed=33
+        )
+        self.assertLess(err, 5e-3)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("triton") is not None and torch.cuda.is_available(),
+        "requires triton and CUDA",
+    )
+    def test_fused_gqa_paged_matches_dense(self):
+        """Paged Triton kernel must use the same h_q → h_kv mapping as dense (KV_HEAD_GROUPS)."""
+        device = "cuda"
+        D = 32
+        block_size = 8
+        H_q, H_kv = 8, 2
+        quantizer = TurboQuantProd(bits=3, head_dim=D, device=device, dtype=torch.float32, seed=34)
+        B, M, N = 1, 3, 24
+        torch.manual_seed(35)
+        q = torch.randn(B, H_q, M, D, device=device, dtype=torch.float32)
+        k_kv = torch.randn(B, H_kv, N, D, device=device, dtype=torch.float32)
+        v_kv = torch.randn(B, H_kv, N, D, device=device, dtype=torch.float32)
+        kv = quantizer.quantize_kv(k_kv, v_kv, return_compressed=True)
+        out_dense = quantizer.quantized_attention_fused_triton(q, kv, num_kv_heads=H_kv)
+        paged, block_tables, context_lens = pack_dense_kv_to_paged(kv, block_size=block_size)
+        out_paged = quantizer.quantized_attention_fused_triton_paged(
+            q,
+            paged,
+            block_tables,
+            context_lens,
+            block_size=block_size,
+            max_seq_len=N,
+            num_kv_heads=H_kv,
+        )
+        self.assertLess(torch.max(torch.abs(out_dense - out_paged)).item(), 5e-3)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("triton") is not None and torch.cuda.is_available(),
+        "requires triton and CUDA",
+    )
+    def test_fused_gqa_causal_matches_reference(self):
+        device = "cuda"
+        D = 32
+        H_q, H_kv = 6, 2
+        S = 15
+        quantizer = TurboQuantProd(bits=3, head_dim=D, device=device, dtype=torch.float32, seed=36)
+        err = _fused_gqa_matches_repeated_kv(
+            quantizer,
+            B=1,
+            H_q=H_q,
+            H_kv=H_kv,
+            M=S,
+            N=S,
+            D=D,
+            device=device,
+            seed=37,
+            causal=True,
+        )
+        self.assertLess(err, 5e-3)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("triton") is not None and torch.cuda.is_available(),
+        "requires triton and CUDA",
+    )
+    def test_fused_gqa_custom_mask_matches_reference(self):
+        device = "cuda"
+        D = 32
+        H_q, H_kv = 8, 2
+        B, M, N = 1, 5, 18
+        quantizer = TurboQuantProd(bits=3, head_dim=D, device=device, dtype=torch.float32, seed=38)
+        torch.manual_seed(39)
+        mask = torch.rand(M, N, device=device) > 0.5
+        err = _fused_gqa_matches_repeated_kv(
+            quantizer,
+            B=B,
+            H_q=H_q,
+            H_kv=H_kv,
+            M=M,
+            N=N,
+            D=D,
+            device=device,
+            seed=40,
+            attention_mask=mask,
+        )
+        self.assertLess(err, 5e-3)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("triton") is not None and torch.cuda.is_available(),
+        "requires triton and CUDA",
+    )
+    def test_fused_gqa_wrong_kv_head_count_raises(self):
+        device = "cuda"
+        D = 32
+        quantizer = TurboQuantProd(bits=3, head_dim=D, device=device, dtype=torch.float32, seed=41)
+        q = torch.randn(1, 8, 3, D, device=device, dtype=torch.float32)
+        k = torch.randn(1, 2, 10, D, device=device, dtype=torch.float32)
+        v = torch.randn(1, 2, 10, D, device=device, dtype=torch.float32)
+        kv = quantizer.quantize_kv(k, v, return_compressed=True)
+        with self.assertRaises(ValueError) as ctx:
+            quantizer.quantized_attention_fused_triton(q, kv, num_kv_heads=4)
+        self.assertIn("num_kv_heads", str(ctx.exception).lower())
 
     @unittest.skipUnless(
         importlib.util.find_spec("triton") is not None and torch.cuda.is_available(),

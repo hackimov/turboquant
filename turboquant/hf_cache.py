@@ -6,6 +6,16 @@ for standard attention). Optional ``hybrid_float_cache=True`` keeps a running fl
 incoming states) so ``update`` skips full ``decompress`` on the non-strict path; see class docstring.
 Sliding-window layers stay ``DynamicSlidingWindowLayer`` (HF, FP).
 
+**Encoder–decoder (cross-attention KV):** :func:`turboquant_encoder_decoder_cache` builds
+:class:`TurboQuantEncoderDecoderCache` (HF :class:`transformers.cache_utils.EncoderDecoderCache`) with
+``DynamicCache`` for decoder self-attention and ``TurboQuantDynamicCache`` for **encoder KV** seen by the
+decoder (T5, mT5, M2M-100, NLLB-family checkpoints that share the M2M-100 stack, MarianMT, etc.).
+Pass ``TurboQuantProd(..., head_dim=...)`` matching that model’s attention head size (T5/mT5: ``config.d_kv``;
+M2M-100 / NLLB dense: ``config.d_model // config.decoder_attention_heads`` — often **64**, **128** for
+``nllb-200-3.3B``). T5 uses **unscaled** dot-product attention in Transformers; keep ``triton_fused_cross=False``
+(default) for T5-faithful logits. Additive masks for Triton broadcast to ``[B,H,M,N]``; cross-attention
+padding masks shaped like ``[B,1,tgt_len,src_len]`` are valid (see :func:`turboquant.kernels.attention_mask.broadcast_additive_attn_mask`).
+
 **Paged export:** ``export_compressed_to_paged`` / ``export_cache_to_paged_per_layer`` match
 ``pack_dense_kv_to_paged`` for our Triton paged API (not a vLLM worker without upstream changes).
 
@@ -26,7 +36,7 @@ if TYPE_CHECKING:
     from transformers.configuration_utils import PreTrainedConfig
 
 try:
-    from transformers.cache_utils import Cache, CacheLayerMixin, DynamicCache
+    from transformers.cache_utils import Cache, CacheLayerMixin, DynamicCache, EncoderDecoderCache
 except ImportError as _e:  # pragma: no cover
     raise ImportError(
         "Module `turboquant.hf_cache` requires `transformers`. "
@@ -385,6 +395,77 @@ def turboquant_dynamic_cache(
         offloading=offloading,
         offload_only_non_sliding=offload_only_non_sliding,
     )
+
+
+class TurboQuantEncoderDecoderCache(EncoderDecoderCache):
+    """
+    :class:`transformers.cache_utils.EncoderDecoderCache` with **TurboQuant-compressed cross-attention KV**
+    (encoder memory) in ``cross_attention_cache``.
+
+    In ``transformers`` 5.x this is represented as two :class:`DynamicCache` instances (self vs cross), not a
+    legacy flat tuple of four tensors per layer; see :func:`turboquant_encoder_decoder_cache`.
+    """
+
+
+def turboquant_encoder_decoder_cache(
+    config: "PreTrainedConfig",
+    quantizer: TurboQuantProd,
+    *,
+    quantize_self: bool = False,
+    triton_fused_self: bool = False,
+    triton_fused_cross: bool = False,
+    strict_reencode: bool = False,
+    hybrid_float_cache: bool = False,
+    offloading: bool = False,
+    offload_only_non_sliding: bool = False,
+) -> "TurboQuantEncoderDecoderCache":
+    """
+    Build ``past_key_values`` for encoder–decoder models (T5, mT5, M2M-100, NLLB checkpoints, etc.).
+
+    Returns :class:`TurboQuantEncoderDecoderCache`: decoder **self-attention** uses
+    :class:`DynamicCache` by default; **cross-attention** (encoder KV) uses :class:`TurboQuantDynamicCache`.
+
+    **NLLB on the Hub:** many NLLB checkpoints use ``model_type: "m2m_100"`` and
+    ``M2M100ForConditionalGeneration`` in ``config.json`` (same implementation family as M2M-100). Treat
+    **head_dim** as ``config.d_model // config.decoder_attention_heads`` (often **64**; **128** for
+    ``nllb-200-3.3B`` with ``d_model=2048``).
+
+    Set ``quantize_self=True`` to compress decoder self-attention KV as well.
+
+    **Head size:** instantiate ``TurboQuantProd`` with ``head_dim`` equal to the model’s per-head KV width
+    (T5 / mT5: ``config.d_kv``; M2M-100 / NLLB (dense): ``config.d_model // config.decoder_attention_heads``).
+
+    **T5 cross-attention:** Hugging Face uses unscaled dot-product logits; leave ``triton_fused_cross=False``
+    (default) so attention runs via decompressed K/V and standard matmul (numerically consistent with eager).
+    """
+    cache_kw = {
+        "strict_reencode": strict_reencode,
+        "hybrid_float_cache": hybrid_float_cache,
+        "offloading": offloading,
+        "offload_only_non_sliding": offload_only_non_sliding,
+    }
+
+    if quantize_self:
+        self_cache: Cache = TurboQuantDynamicCache(
+            config,
+            quantizer,
+            triton_fused_layers=triton_fused_self,
+            **cache_kw,
+        )
+    else:
+        self_cache = DynamicCache(
+            config=config,
+            offloading=offloading,
+            offload_only_non_sliding=offload_only_non_sliding,
+        )
+
+    cross_cache = TurboQuantDynamicCache(
+        config,
+        quantizer,
+        triton_fused_layers=triton_fused_cross,
+        **cache_kw,
+    )
+    return TurboQuantEncoderDecoderCache(self_cache, cross_cache)
 
 
 def export_compressed_to_paged(

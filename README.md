@@ -48,8 +48,9 @@ The [Google Research blog](https://research.google/blog/turboquant-redefining-ai
 
 - **`TurboQuantModel`**: model wrapper + quantizer; **legacy** path via per-layer tuples **`quantize_past_key_values` / `dequantize_past_key_values`**.
 - **`TurboQuantDynamicCache`**: compressed KV on full-width layers; **sliding-window** layers stay ordinary HF layers.
+- **`turboquant_encoder_decoder_cache`** / **`TurboQuantEncoderDecoderCache`** (or `TurboQuantModel.make_encoder_decoder_cache()`): HF `EncoderDecoderCache` for **cross-attention KV** (encoder memory). **T5 / mT5:** `head_dim = config.d_kv`. **M2M-100 / NLLB (dense):** Hub configs often use `model_type: m2m_100` and `M2M100ForConditionalGeneration`; `head_dim = config.d_model // config.decoder_attention_heads` (typically **64** for 600M/1.3B/418M, **128** for `nllb-200-3.3B` with `d_model=2048`). Default path keeps **stock HF attention** on decompressed KV for T5 (unscaled logits); **MarianMT** uses the same cross-KV cache idea but is **not** covered by decoder fused attention (`supported_fused_attention_architectures`) until a dedicated wrapper exists.
 - Export to per-layer paged tensors: **`turboquant.hf_cache.export_cache_to_paged_per_layer`**.
-- **Decoder fused attention (CUDA + Triton)** without full dequant every step for several architectures: **`enable_decoder_fused_attention`** / **`install_decoder_fused_attention`** and related APIs in **`turboquant.hf_fused_attention`**; includes **Llama**, **Mistral**, **Qwen2**, **Gemma2** (falls back to stock on softcap / non-standard query scaling), **Phi-3**, **Cohere**, **Granite**, **Starcoder2** — full list: **`supported_fused_attention_architectures()`**.
+- **Decoder fused attention (CUDA + Triton)** without full dequant every step for several architectures: **`enable_decoder_fused_attention`** / **`install_decoder_fused_attention`** and related APIs in **`turboquant.hf_fused_attention`**; includes **Llama** (incl. Llama 3.3), **Mistral**, **Qwen2**, **Qwen3**, **Gemma2** (falls back to stock on softcap / non-standard query scaling), **Phi-3** / **Phi-4** / **Phi-4-mini** (HF alias **`phi4`**, same `Phi3Attention`), **Phi-4 Multimodal** text decoder (**`phi4_multimodal`**, `Phi4MultimodalAttention`; vision/audio towers unchanged), **InternLM2 / InternLM2.5** (**`internlm2`**, fused `wqkv`) and **InternLM3** (**`internlm3`**) via Hub `trust_remote_code` (see **`turboquant.hf_internlm_fused`**), **Cohere**, **Granite**, **Starcoder2** — full list: **`supported_fused_attention_architectures()`**.
 - Cache modes: e.g. **`triton_fused_layers`**, **`strict_reencode`**, optional **`hybrid_float_cache`** (memory vs. dequant trade-off on long context — see code and `examples/hf_generate_turboquant_cache.py`).
 
 ### Out-of-tree integrations
@@ -61,6 +62,7 @@ The [Google Research blog](https://research.google/blog/turboquant-redefining-ai
 
 - `examples/simple_usage.py` — **inner product** / cosine metrics on the score matrix (not only vector MSE).
 - `examples/hf_generate_turboquant_cache.py` — generation with compressed cache; **`--fused`** for CUDA+Triton.
+- `tests/test_hf_nllb_distilled_600m_hub_config.py` — optional **Hub** fetch of `facebook/nllb-200-distilled-600M` **config only** (no weights): asserts `model_type == m2m_100`, `head_dim = 64`, and `turboquant_encoder_decoder_cache` layer count (skips if offline / no cache).
 - `benchmarks/needle_in_a_haystack_simple.py`, `benchmarks/longbench_simple.py` — simplified runs.
 
 ---

@@ -1,6 +1,10 @@
 """
 Binary layout for TurboQuant-compressed paged KV (one uint8 row per physical page).
 
+This is **not** FlashAttention / FlashAttention-3 / Hopper FP8 KV storage layout: those stacks
+use their own packed K/V formats for vendor kernels. TurboQuant pages are only consumed by
+``turboquant.kernels.fused_attention.turboquant_fused_attention_paged`` (Triton) via ``*_phys`` views.
+
 Used by the vLLM upstream overlay in ``integrations/vllm_upstream/``: one logical
 ``[num_blocks, page_bytes]`` tensor matches the fused Triton paged tensors
 ``[P, block_size, H, D]`` / ``[P, block_size, H, 1]`` laid out back-to-back.

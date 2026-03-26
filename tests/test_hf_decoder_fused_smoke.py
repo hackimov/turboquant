@@ -1,4 +1,4 @@
-"""Smoke: Mistral / Qwen2 + TurboQuant fused attention (same contract as Llama-style)."""
+"""Smoke: Mistral / Qwen2 / Qwen3 + TurboQuant fused attention (same contract as Llama-style)."""
 
 from __future__ import annotations
 
@@ -106,6 +106,29 @@ def _tiny_qwen2(device: str):
     return m
 
 
+def _tiny_qwen3(device: str):
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    cfg = Qwen3Config(
+        vocab_size=256,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=128,
+        rms_norm_eps=1e-5,
+        use_sliding_window=False,
+    )
+    if hasattr(cfg, "attn_implementation"):
+        cfg.attn_implementation = "eager"
+    m = Qwen3ForCausalLM(cfg)
+    m.to(device=device, dtype=torch.float32)
+    m.eval()
+    return m
+
+
 @unittest.skipUnless(_have_transformers(), "requires transformers")
 class TestHFDecoderFusedSmoke(unittest.TestCase):
     @unittest.skipUnless(_triton_cuda(), "requires CUDA and Triton")
@@ -155,6 +178,31 @@ class TestHFDecoderFusedSmoke(unittest.TestCase):
                 out = model(input_ids=inp, attention_mask=attn, past_key_values=cache, use_cache=True)
             self.assertTrue(torch.isfinite(out.logits).all())
             self.assertIsInstance(model.model.layers[0].self_attn, TurboQuantQwen2Attention)
+        finally:
+            uninstall_turboquant_fused_attention(model)
+
+    @unittest.skipUnless(_triton_cuda(), "requires CUDA and Triton")
+    def test_qwen3_fused_prefill_cuda(self):
+        from turboquant.hf_cache import turboquant_dynamic_cache
+        from turboquant.hf_fused_attention import (
+            TurboQuantQwen3Attention,
+            install_turboquant_fused_attention,
+            uninstall_turboquant_fused_attention,
+        )
+
+        device = "cuda"
+        model = _tiny_qwen3(device)
+        hd = int(getattr(model.config, "head_dim", model.config.hidden_size // model.config.num_attention_heads))
+        q = TurboQuantProd(bits=3, head_dim=hd, device=device, dtype=torch.float32, seed=120)
+        cache = turboquant_dynamic_cache(model.config, q, triton_fused_layers=True, strict_reencode=False)
+        install_turboquant_fused_attention(model, q, architecture="qwen3")
+        try:
+            inp = torch.randint(0, model.config.vocab_size, (1, 4), device=device)
+            attn = torch.ones(1, 4, dtype=torch.long, device=device)
+            with torch.no_grad():
+                out = model(input_ids=inp, attention_mask=attn, past_key_values=cache, use_cache=True)
+            self.assertTrue(torch.isfinite(out.logits).all())
+            self.assertIsInstance(model.model.layers[0].self_attn, TurboQuantQwen3Attention)
         finally:
             uninstall_turboquant_fused_attention(model)
 
