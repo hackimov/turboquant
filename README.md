@@ -19,10 +19,6 @@
 
 ---
 
-Open-source implementation of **TurboQuant** (Google Research, [ICLR 2026](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/)): **KV-cache** compression in decoder LLMs via **PolarQuant** and **QJL** (Quantized Johnson–Lindenstrauss). Theory and motivation are in the [blog post](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/) and on [arXiv:2504.19874](https://arxiv.org/abs/2504.19874).
-
----
-
 ## 📊 Reported results
 
 The [Google Research blog](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/) reports TurboQuant numbers on open LLMs (including Gemma, Mistral, Llama-3.1-8B-Instruct):
@@ -193,6 +189,37 @@ k_rec, v_rec = quantizer.decompress(compressed)
 ```
 
 For a full model: **`TurboQuantModel`**, **`make_dynamic_cache()`**, and optionally **`enable_decoder_fused_attention()`** — see `examples/hf_generate_turboquant_cache.py`.
+
+### Vector search API (`turboquant.search.VectorIndex`)
+
+FAISS-like, in-memory approximate ANN with native TurboQuant compression:
+
+```python
+import torch
+from turboquant.search import VectorIndex
+
+index = VectorIndex(
+    dim=128,
+    bits=3,
+    metric="ip",   # "ip" | "cosine" | "l2"
+    device="cpu",  # or "cuda"
+    seed=42,
+)
+
+xb = torch.randn(10000, 128)  # database vectors
+xq = torch.randn(4, 128)      # query vectors
+
+index.add(xb)                 # optional: index.add(xb, ids=custom_ids)
+scores, ids = index.search(xq, k=10)
+print(scores.shape, ids.shape)  # torch.Size([4, 10]) torch.Size([4, 10])
+```
+
+Notes:
+- `index.ntotal` returns number of indexed vectors.
+- `index.reset()` clears all compressed vectors.
+- Search runs in chunks (`search_chunk_size`) to bound memory.
+
+Example script: `examples/vector_search_simple.py`.
 
 ---
 

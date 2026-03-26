@@ -15,10 +15,12 @@ from .calibration import (
     kmeans_1d,
 )
 from .core import TurboQuantProd
+from .search import VectorIndex
 from .transformers_integration import TurboQuantModel
 
 __all__ = [
     "TurboQuantProd",
+    "VectorIndex",
     "TurboQuantModel",
     "CalibrationMode",
     "calibrate_turboquant_from_tensor",
