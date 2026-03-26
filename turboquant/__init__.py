@@ -5,8 +5,8 @@ Open-source implementation of Google TurboQuant (arXiv:2504.19874)
 https://github.com/hackimov/turboquant-kv
 """
 
-__version__ = "0.1.0"
-__author__ = "hackimov + Grok (xAI)"
+__version__ = "0.1.2"
+__author__ = "hackimov"
 
 from .calibration import (
     CalibrationMode,
